@@ -20,16 +20,11 @@
 #
 set -euo pipefail
 
-# ── Pre-built image (optional) ───────────────────────────────────
-# GitHub Actions (docker-publish.yml) builds and pushes this automatically.
-# Set PREBUILT_IMAGE to your repo's ghcr.io address and every VPS will pull
-# the pre-built image (~10 s) instead of building from scratch (~5 min).
-#
-# Format:  ghcr.io/<github-username>/<repo-name>:latest
-# Example: ghcr.io/myusername/tailscale-warp-container:latest
-#
-# Leave empty to always build locally (original behaviour).
-PREBUILT_IMAGE="${PREBUILT_IMAGE:-}"
+# ── Pre-built image ───────────────────────────────────────────────
+# Built and kept up-to-date automatically by GitHub Actions.
+# Override at runtime:  PREBUILT_IMAGE=other/image ./deploy.sh
+# Set to empty string to force a local build:  PREBUILT_IMAGE= ./deploy.sh
+PREBUILT_IMAGE="${PREBUILT_IMAGE:-ghcr.io/iamlotp/ts-warp-containerized:latest}"
 
 # ─────────────────────────── helpers ───────────────────────────
 
