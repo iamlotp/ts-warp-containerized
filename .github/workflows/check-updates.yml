@@ -1,0 +1,152 @@
+name: Check for Package Updates
+
+on:
+  schedule:
+    # Runs every day at 06:00 UTC
+    - cron: "0 6 * * *"
+  workflow_dispatch:          # allow manual trigger from the GitHub UI
+
+permissions:
+  contents: write             # needed to commit versions.json back to the repo
+
+jobs:
+  check-versions:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Get the latest Tailscale version ────────────────────────
+      # Source: official GitHub releases
+      - name: Fetch latest Tailscale version
+        id: ts
+        run: |
+          LATEST=$(curl -sf \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            https://api.github.com/repos/tailscale/tailscale/releases/latest \
+            | jq -r '.tag_name | ltrimstr("v")')
+
+          if [[ -z "$LATEST" || "$LATEST" == "null" ]]; then
+            echo "::warning::Could not fetch Tailscale version from GitHub API."
+            LATEST="unknown"
+          fi
+
+          echo "version=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "Tailscale latest: $LATEST"
+
+      # ── Get the latest Cloudflare WARP version ───────────────────
+      # Source: Cloudflare's apt repository for Ubuntu Noble
+      - name: Fetch latest Cloudflare WARP version
+        id: warp
+        run: |
+          # Fetch the compressed package index (fall back to uncompressed)
+          if curl -sf https://pkg.cloudflareclient.com/dists/noble/main/binary-amd64/Packages.gz \
+               -o /tmp/warp-packages.gz 2>/dev/null; then
+            zcat /tmp/warp-packages.gz > /tmp/warp-packages.txt
+          elif curl -sf https://pkg.cloudflareclient.com/dists/noble/main/binary-amd64/Packages \
+               -o /tmp/warp-packages.txt 2>/dev/null; then
+            echo "Used uncompressed Packages file."
+          else
+            echo "::warning::Could not fetch Cloudflare WARP package list."
+            echo "version=unknown" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          LATEST=$(awk '
+            /^Package: cloudflare-warp$/ { found=1 }
+            found && /^Version:/ { print $2; found=0 }
+          ' /tmp/warp-packages.txt | head -1)
+
+          if [[ -z "$LATEST" ]]; then
+            echo "::warning::Could not parse WARP version from package index."
+            LATEST="unknown"
+          fi
+
+          echo "version=$LATEST" >> "$GITHUB_OUTPUT"
+          echo "Cloudflare WARP latest: $LATEST"
+
+      # ── Compare with what we last built ─────────────────────────
+      - name: Compare with last built versions
+        id: compare
+        run: |
+          TS_NEW="${{ steps.ts.outputs.version }}"
+          WARP_NEW="${{ steps.warp.outputs.version }}"
+
+          if [ -f versions.json ]; then
+            TS_OLD=$(jq -r '.tailscale // ""' versions.json)
+            WARP_OLD=$(jq -r '.cloudflare_warp // ""' versions.json)
+          else
+            TS_OLD=""
+            WARP_OLD=""
+          fi
+
+          echo "Tailscale:       old=$TS_OLD  new=$TS_NEW"
+          echo "Cloudflare WARP: old=$WARP_OLD  new=$WARP_NEW"
+
+          if [[ "$TS_NEW" != "$TS_OLD" || "$WARP_NEW" != "$WARP_OLD" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Package update detected — will trigger a new image build."
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No version changes detected. Skipping build."
+          fi
+
+      # ── Write updated versions.json and push ────────────────────
+      # The push to main will trigger docker-publish.yml automatically.
+      - name: Update versions.json and commit
+        if: steps.compare.outputs.changed == 'true'
+        run: |
+          TS_NEW="${{ steps.ts.outputs.version }}"
+          WARP_NEW="${{ steps.warp.outputs.version }}"
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          cat > versions.json << EOF
+          {
+            "tailscale": "$TS_NEW",
+            "cloudflare_warp": "$WARP_NEW",
+            "last_checked": "$TIMESTAMP"
+          }
+          EOF
+
+          # Normalise the JSON (strip leading spaces from heredoc)
+          python3 -c "
+          import json, sys
+          with open('versions.json') as f:
+              data = json.load(f)
+          with open('versions.json', 'w') as f:
+              json.dump(data, f, indent=2)
+              f.write('\n')
+          "
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add versions.json
+          git commit -m "chore: bump packages — tailscale $TS_NEW, warp $WARP_NEW [skip ci for this commit]"
+          git push
+
+          echo "::notice::versions.json updated and pushed. docker-publish.yml will now run."
+
+      # ── Summary ─────────────────────────────────────────────────
+      - name: Summary
+        run: |
+          TS="${{ steps.ts.outputs.version }}"
+          WARP="${{ steps.warp.outputs.version }}"
+          CHANGED="${{ steps.compare.outputs.changed }}"
+
+          echo "## Package version check" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Package           | Latest version |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------------------|----------------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Tailscale         | \`$TS\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Cloudflare WARP   | \`$WARP\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$CHANGED" == "true" ]]; then
+            echo "🔄 **Update detected** — a new image build has been triggered." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "✅ **No changes** — image is already up to date." >> "$GITHUB_STEP_SUMMARY"
+          fi
