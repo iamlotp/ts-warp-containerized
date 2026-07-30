@@ -1,5 +1,5 @@
 {
-  "tailscale": "",
-  "cloudflare_warp": "",
-  "last_checked": ""
+  "tailscale": "1.98.10",
+  "cloudflare_warp": "2026.6.880.0",
+  "last_checked": "2026-07-30T08:36:43Z"
 }
